@@ -8,7 +8,7 @@ HiGan+ env: ```bash pip install -r requirements.txt -f https://download.pytorch.
 
 Python version: 3.8
 
-HiGan+ inderence, follow <https://github.com/ganji15/HiGANplus.git>, change plt.show() to plt.savefig()
+HiGan+ inderence, follow <https://github.com/ganji15/HiGANplus.git>, change plt.show() to plt.savefig() in `/HiGANplus/HiGAN+/networks/model.py`
 
 Curent demo env: comming soon
 
