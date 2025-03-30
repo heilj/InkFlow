@@ -1,0 +1,32 @@
+# ======================================================
+# Recommended installation command:
+# pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
+#
+# Python version: 3.8 (recommended for compatibility with PyTorch 1.11.0 and HiGAN+)
+# Purpose: HiGAN+ evaluation and training environment
+# ======================================================
+
+# ========== Core Deep Learning Stack ==========
+torch==1.11.0+cu113         # PyTorch with CUDA 11.3 support (compatible with CUDA 11.8)
+torchvision==0.12.0+cu113   # TorchVision matching torch version
+torchaudio==0.11.0          # Audio module from PyTorch ecosystem
+
+# ========== Numerical and Scientific Utilities ==========
+numpy==1.24.4               # NumPy < 2.0 to avoid PyTorch compatibility warnings
+h5py                        # For loading .hdf5 datasets
+tqdm                        # Progress bar for loops
+
+# ========== Image Processing ==========
+Pillow                      # PIL-based image I/O (for saving output images)
+matplotlib                  # Visualization (used for output images)
+scikit-image                # Image analysis tools (rescale, filters, etc.)
+opencv-python               # Computer vision operations and image preprocessing
+
+# ========== ML & Evaluation ==========
+scikit-learn                # Common ML tools, evaluation metrics, etc.
+distance                    # String distance library (e.g., Levenshtein distance)
+
+# ========== Config and Logging ==========
+pyyaml                      # To load YAML configuration files
+munch                       # Convert dicts to dot-accessible objects
+tensorboard                 # Visualization tool for training logs
