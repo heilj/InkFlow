@@ -17,7 +17,7 @@ h5py                        # For loading .hdf5 datasets
 tqdm                        # Progress bar for loops
 
 # ========== Image Processing ==========
-Pillow                      # PIL-based image I/O (for saving output images)
+Pillow==9.5.0               # PIL-based image I/O (for saving output images)
 matplotlib                  # Visualization (used for output images)
 scikit-image                # Image analysis tools (rescale, filters, etc.)
 opencv-python               # Computer vision operations and image preprocessing
