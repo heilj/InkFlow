@@ -52,10 +52,10 @@ dataset = Hdf5Dataset(
     process_style=True
 )
 
-train_len = int(0.01 * len(dataset))
+train_len = int(0.5 * len(dataset))
 val_len = len(dataset) - train_len
 
-t_val_len = int(0.01 * val_len)
+t_val_len = int(0.1 * val_len)
 
 train_set, val_set = random_split(dataset, [train_len, val_len])
 _, t_val_set = random_split(val_set, [val_len - t_val_len, t_val_len])

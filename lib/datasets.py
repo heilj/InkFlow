@@ -43,7 +43,13 @@ class Hdf5Dataset(Dataset):
             self.wids = h5f['wids'][:]
             if normalize_wid:
                 self.wids -= self.wids.min()
-            
+            valid_idxs = (self.img_lens >= 16)
+
+            self.img_seek_idxs = self.img_seek_idxs[valid_idxs]
+            self.lb_seek_idxs = self.lb_seek_idxs[valid_idxs]
+            self.img_lens = self.img_lens[valid_idxs]
+            self.lb_lens = self.lb_lens[valid_idxs]
+            self.wids = self.wids[valid_idxs]
             h5f.close()
             
         else:
