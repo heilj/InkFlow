@@ -6,11 +6,14 @@
 
 HiGan+ env: ```bash pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html```
 
-Python version: 3.8
+Python version: 3.8 (HiGAN+)
+
+Flow Matching python version: 3.12
+Flow matching env: ```bash pip install -r requirements_fm.txt```
 
 HiGan+ inderence, follow <https://github.com/ganji15/HiGANplus.git>, change plt.show() to plt.savefig() in `/HiGANplus/HiGAN+/networks/model.py`
 
-Curent demo env: comming soon
+Curent demo env: same as flow matching
 
 ### Dataset
 
@@ -23,6 +26,12 @@ Processed data credit: <https://github.com/ganji15/HiGANplus.git>
 For use of dataset and understanding of its structure, see `./IAM_data_process_demo.py`
 
 Data processing files are under `./lib`
+
+### Flow matching
+
+`Conditioned_FM_on_IAM.py` dependent on other `./lib`, `./networks`, `./flow_matching`
+
+details will be updated later
 
 ### Current demos
 

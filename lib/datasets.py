@@ -9,9 +9,10 @@ import glob
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose, Normalize, ToTensor
-from lib.alphabet import strLabelConverter
+from lib.alphabet import strLabelConverter, Alphabets
 from lib.path_config import data_roots, data_paths, ImgHeight, CharWidth
 from lib.transforms import RandomScale, RandomClip
+import pickle
 
 
 class Hdf5Dataset(Dataset):
@@ -22,7 +23,11 @@ class Hdf5Dataset(Dataset):
         self.transforms = transforms
         self.org_transforms = Compose([ToTensor(), Normalize([0.5], [0.5])])
         self.label_converter = strLabelConverter(alphabet_key)
+        self.letters = Alphabets['all']
+        self.letter2index = {label: n for n, label in enumerate(self.letters)}
         self.process_style = process_style
+        
+        self.con_symbols = self.get_symbols('unifont')
 
     def _load_h5py(self, file_path, normalize_wid=True):
         # print(self.file_path)
@@ -30,12 +35,17 @@ class Hdf5Dataset(Dataset):
         if os.path.exists(self.file_path):
             h5f = h5py.File(self.file_path, 'r')
             self.imgs, self.lbs = h5f['imgs'][:], h5f['lbs'][:]
+            # self.laplace_refs = h5f['laplacian_refs'][:]
             self.img_seek_idxs, self.lb_seek_idxs = h5f['img_seek_idxs'][:], h5f['lb_seek_idxs'][:]
+            # self.laplace_seek_idxs = h5f['laplacian_seek_idxs'][:]
             self.img_lens, self.lb_lens = h5f['img_lens'][:], h5f['lb_lens'][:]
+            # self.laplace_lens = h5f['laplacian_lens'][:]
             self.wids = h5f['wids'][:]
             if normalize_wid:
                 self.wids -= self.wids.min()
+            
             h5f.close()
+            
         else:
             print(self.file_path, ' does not exist!')
             self.imgs, self.lbs = None, None
@@ -43,18 +53,37 @@ class Hdf5Dataset(Dataset):
             self.img_lens, self.lb_lens =  None, None
             self.wids = None
 
+    def get_symbols(self, input_type):
+        with open(f"data/{input_type}.pickle", "rb") as f:
+            symbols = pickle.load(f)
+
+        symbols = {sym['idx'][0]: sym['mat'].astype(np.float32) for sym in symbols}
+        contents = []
+        for char in self.letters:
+            symbol = torch.from_numpy(symbols[ord(char)]).float()
+            contents.append(symbol)
+        contents.append(torch.zeros_like(contents[0])) # blank image as PAD_TOKEN
+        contents = torch.stack(contents)
+        return contents
+
     def __getitem__(self, idx):
         data = {}
         img_seek_idx, img_len = self.img_seek_idxs[idx], self.img_lens[idx]
         lb_seek_idx, lb_len = self.lb_seek_idxs[idx], self.lb_lens[idx]
+        # laplace_seek_idx, laplace_len = self.laplace_seek_idxs[idx], self.laplace_lens[idx]
         img = self.imgs[:, img_seek_idx : img_seek_idx + img_len]
         text = ''.join(chr(ch) for ch in self.lbs[lb_seek_idx : lb_seek_idx + lb_len])
+        # laplace_ref = self.laplace_refs[:, laplace_seek_idx : laplace_seek_idx + laplace_len]
         data['text'] = text
         lb = self.label_converter.encode(text)
+        content = [self.letter2index[i] for i in text]
+        content = self.con_symbols[content]
+        data['content'] = content
         wid = self.wids[idx]
         data['lb'], data['wid'] = lb, wid
-
         data['org_img'] = self.org_transforms(Image.fromarray(deepcopy(img), mode='L'))
+        # data['laplace_img'] = self.org_transforms(Image.fromarray(deepcopy(laplace_ref), mode='L'))
+
 
         # style image
         if self.process_style:
@@ -85,26 +114,32 @@ class Hdf5Dataset(Dataset):
         tmp = leng % scale
         return leng + scale - tmp if tmp != 0 else leng
 
-    @staticmethod
-    def collect_fn(batch):
-        org_imgs, org_img_lens, style_imgs, style_img_lens, aug_imgs, aug_img_lens,\
-        lbs, lb_lens, wids = [], [], [], [], [], [], [], [], []
+    def _pad_to_multiple(length, multiple=8):
+        return (length + multiple - 1) // multiple * multiple
 
-        for data in batch:
+    
+    @staticmethod
+    def collect_fn(batch, pad_multiple=8):
+        org_imgs, org_img_lens, style_imgs, style_img_lens, aug_imgs, aug_img_lens,\
+        lbs, lb_lens, wids, laplacian_imgs, laplacian_refs, style_refs = [], [], [], [], [], [], [], [], [], [], [], []
+        c_width = [len(item['content']) for item in batch]
+        content_ref = torch.zeros([len(batch), max(c_width), 16 , 16], dtype=torch.float32)
+        for idx, data in enumerate(batch):
             org_img, style_img, lb, wid = data['org_img'], data['style_img'], data['lb'], data['wid']
+            # laplacian_img = data['laplace_img']
             aug_img = data['aug_img'] if 'aug_img' in data else None
-            if isinstance(org_img, torch.Tensor):
-                org_img = org_img.numpy()
-            if isinstance(style_img, torch.Tensor):
-                style_img = style_img.numpy()
-            if aug_img is not None and isinstance(aug_img, torch.Tensor):
-                aug_img = aug_img.numpy()
+            if isinstance(org_img, torch.Tensor): org_img = org_img.numpy()
+            if isinstance(style_img, torch.Tensor): style_img = style_img.numpy()
+            if aug_img is not None and isinstance(aug_img, torch.Tensor): aug_img = aug_img.numpy()
 
             org_imgs.append(org_img)
             org_img_lens.append(org_img.shape[-1])
             style_imgs.append(style_img)
+            # laplacian_imgs.append(laplacian_img)
             style_img_lens.append(style_img.shape[-1])
             lbs.append(lb)
+            content = data['content']
+            content_ref[idx, :len(content)] = content
             lb_lens.append(len(lb))
             wids.append(wid)
             if aug_img is not None:
@@ -113,20 +148,30 @@ class Hdf5Dataset(Dataset):
 
         bdata = {}
         bz = len(lb_lens)
-        pad_org_img_max_len = Hdf5Dataset._recalc_len(max(org_img_lens))
+
+        # === Pad original images ===
+        pad_org_img_max_len = max(org_img_lens)
+        pad_org_img_max_len = Hdf5Dataset._pad_to_multiple(pad_org_img_max_len, multiple=pad_multiple)
         pad_org_imgs = -np.ones((bz, 1, org_imgs[0].shape[-2], pad_org_img_max_len))
         for i, (org_img, org_img_len) in enumerate(zip(org_imgs, org_img_lens)):
             pad_org_imgs[i, 0, :, :org_img_len] = org_img
+        # pad_laplacian_imgs = -np.ones((bz, 1, laplacian_imgs[0].shape[-2], pad_org_img_max_len))
+        # for i, (laplacian_img, org_img_len) in enumerate(zip(laplacian_imgs, org_img_lens)):
+            # pad_laplacian_imgs[i, 0, :, :org_img_len] = laplacian_img
         bdata['org_imgs'] = torch.from_numpy(pad_org_imgs).float()
+        # bdata['laplacian_imgs'] = torch.from_numpy(pad_laplacian_imgs).float()
         bdata['org_img_lens'] = torch.IntTensor(org_img_lens)
 
-        pad_style_img_max_len = Hdf5Dataset._recalc_len(max(style_img_lens))
+        # === Pad style images ===
+        pad_style_img_max_len = max(style_img_lens)
+        pad_style_img_max_len = Hdf5Dataset._pad_to_multiple(pad_style_img_max_len, multiple=pad_multiple)
         pad_style_imgs = -np.ones((bz, 1, style_imgs[0].shape[-2], pad_style_img_max_len))
         for i, (style_img, style_img_len) in enumerate(zip(style_imgs, style_img_lens)):
             pad_style_imgs[i, 0, :, :style_img_len] = style_img
         bdata['style_imgs'] = torch.from_numpy(pad_style_imgs).float()
         bdata['style_img_lens'] = torch.IntTensor(style_img_lens)
 
+        # === Pad labels ===
         pad_lbs = np.zeros((bz, max(lb_lens)))
         for i, (lb, lb_len) in enumerate(zip(lbs, lb_lens)):
             pad_lbs[i, :lb_len] = lb
@@ -134,13 +179,19 @@ class Hdf5Dataset(Dataset):
         bdata['lb_lens'] = torch.Tensor(lb_lens).int()
         bdata['wids'] = torch.Tensor(wids).long()
 
+        # === Pad augmented images if any ===
         if len(aug_imgs) > 0:
-            pad_aug_imgs = -np.ones((bz, 1, aug_imgs[0].shape[-2], max(aug_img_lens)))
+            pad_aug_img_max_len = max(aug_img_lens)
+            pad_aug_img_max_len = Hdf5Dataset._pad_to_multiple(pad_aug_img_max_len, multiple=pad_multiple)
+            pad_aug_imgs = -np.ones((bz, 1, aug_imgs[0].shape[-2], pad_aug_img_max_len))
             for i, aug_img in enumerate(aug_imgs):
                 pad_aug_imgs[i, 0, :, :aug_img.shape[-1]] = aug_img
 
             bdata['aug_imgs'] = torch.from_numpy(pad_aug_imgs).float()
             bdata['aug_img_lens'] = torch.IntTensor(aug_img_lens)
+
+        # content_ref = 1.0 - content_ref # invert the image
+        bdata['content'] = content_ref
 
         return bdata
 
@@ -166,6 +217,20 @@ class Hdf5Dataset(Dataset):
         for key, val in batch.items():
             batch[key] = torch.stack([val[i] for i in idx]).detach()
         return batch
+    @staticmethod
+
+    def sorted_collect_fn_for_ctc(batch):
+        batch = Hdf5Dataset.collect_fn(batch)
+
+        # Use the lengths corresponding to the recognizer input (likely org_img_lens)
+        sort_idx = batch['org_img_lens'].argsort(descending=True)
+
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor) and v.size(0) == sort_idx.size(0):
+                batch[k] = v[sort_idx]
+        return batch
+
+
 
     @staticmethod
     def merge_batch(batch1, batch2, device):
