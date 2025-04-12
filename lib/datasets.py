@@ -29,7 +29,7 @@ class Hdf5Dataset(Dataset):
         self.process_style = process_style
         
         self.con_symbols = self.get_symbols('unifont')
-        self.style_path = 'data/style_wids'
+        
 
     def _load_h5py(self, file_path, normalize_wid=True):
         # print(self.file_path)
@@ -125,11 +125,12 @@ class Hdf5Dataset(Dataset):
     def _pad_to_multiple(length, multiple=8):
         return (length + multiple - 1) // multiple * multiple
     
-    @staticmethod
-    def get_style_ref(self, wr_id):
-        style_list = os.listdir(os.path.join(self.style_path, wr_id))
+    def get_style_ref(wr_id):
+        wr_id = str(wr_id)
+        style_path = 'data/style_wids'
+        style_list = os.listdir(os.path.join(style_path, wr_id))
         style_index = random.sample(range(len(style_list)), 2) # anchor and positive
-        style_images = [cv2.imread(os.path.join(self.style_path, wr_id, style_list[index]), flags=0)
+        style_images = [cv2.imread(os.path.join(style_path, wr_id, style_list[index]), flags=0)
                         for index in style_index]
         # laplace_images = [cv2.imread(os.path.join(self.laplace_path, wr_id, style_list[index]), flags=0)
         #                   for index in style_index]
@@ -160,15 +161,17 @@ class Hdf5Dataset(Dataset):
         c_width = [len(item['content']) for item in batch]
         content_ref = torch.zeros([len(batch), max(c_width), 16 , 16], dtype=torch.float32)
         for idx, data in enumerate(batch):
-            org_img, style_img, lb, wid = data['org_img'], data['style_img'], data['lb'], data['wid']
+            org_img, lb, wid = data['org_img'], data['lb'], data['wid']
             # laplacian_img = data['laplace_img']
             aug_img = data['aug_img'] if 'aug_img' in data else None
+            style_img = Hdf5Dataset.get_style_ref(wid)
             if isinstance(org_img, torch.Tensor): org_img = org_img.numpy()
             if isinstance(style_img, torch.Tensor): style_img = style_img.numpy()
             if aug_img is not None and isinstance(aug_img, torch.Tensor): aug_img = aug_img.numpy()
 
             org_imgs.append(org_img)
             org_img_lens.append(org_img.shape[-1])
+            
             style_imgs.append(style_img)
             # laplacian_imgs.append(laplacian_img)
             style_img_lens.append(style_img.shape[-1])
@@ -200,9 +203,9 @@ class Hdf5Dataset(Dataset):
         # === Pad style images ===
         pad_style_img_max_len = max(style_img_lens)
         pad_style_img_max_len = Hdf5Dataset._pad_to_multiple(pad_style_img_max_len, multiple=pad_multiple)
-        pad_style_imgs = -np.ones((bz, 1, style_imgs[0].shape[-2], pad_style_img_max_len))
+        pad_style_imgs = -np.ones((bz, 2, style_imgs[0].shape[-2], pad_style_img_max_len))
         for i, (style_img, style_img_len) in enumerate(zip(style_imgs, style_img_lens)):
-            pad_style_imgs[i, 0, :, :style_img_len] = style_img
+            pad_style_imgs[i, :, :, :style_img_len] = style_img
         bdata['style_imgs'] = torch.from_numpy(pad_style_imgs).float()
         bdata['style_img_lens'] = torch.IntTensor(style_img_lens)
 
