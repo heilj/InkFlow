@@ -1,0 +1,7 @@
+./data/iam/
+./data/style_wids/
+./ckpt/
+./ckpt_hist/
+./data/MNIST/
+.DS_Store
+data/.DS_Store

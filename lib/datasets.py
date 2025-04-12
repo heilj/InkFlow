@@ -13,6 +13,7 @@ from lib.alphabet import strLabelConverter, Alphabets
 from lib.path_config import data_roots, data_paths, ImgHeight, CharWidth
 from lib.transforms import RandomScale, RandomClip
 import pickle
+import random
 
 
 class Hdf5Dataset(Dataset):
@@ -28,6 +29,7 @@ class Hdf5Dataset(Dataset):
         self.process_style = process_style
         
         self.con_symbols = self.get_symbols('unifont')
+        self.style_path = 'data/style_wids'
 
     def _load_h5py(self, file_path, normalize_wid=True):
         # print(self.file_path)
@@ -122,8 +124,35 @@ class Hdf5Dataset(Dataset):
 
     def _pad_to_multiple(length, multiple=8):
         return (length + multiple - 1) // multiple * multiple
-
     
+    @staticmethod
+    def get_style_ref(self, wr_id):
+        style_list = os.listdir(os.path.join(self.style_path, wr_id))
+        style_index = random.sample(range(len(style_list)), 2) # anchor and positive
+        style_images = [cv2.imread(os.path.join(self.style_path, wr_id, style_list[index]), flags=0)
+                        for index in style_index]
+        # laplace_images = [cv2.imread(os.path.join(self.laplace_path, wr_id, style_list[index]), flags=0)
+        #                   for index in style_index]
+        height =64
+        # height = style_images[0].shape[0]
+        # assert height == style_images[1].shape[0], 'the heights of style images are not consistent'
+        max_w = max([style_image.shape[1] for style_image in style_images])
+        
+        '''style images'''
+        style_images = [style_image / 127.5 - 1.0 for style_image in style_images]
+        new_style_images = np.ones([2, height, max_w], dtype=np.float32)
+        new_style_images[0, :, :style_images[0].shape[1]] = style_images[0]
+        new_style_images[1, :, :style_images[1].shape[1]] = style_images[1]
+
+        '''laplace images'''
+        # laplace_images = [laplace_image/255.0 for laplace_image in laplace_images]
+        # new_laplace_images = np.zeros([2, height, max_w], dtype=np.float32)
+        # new_laplace_images[0, :, :laplace_images[0].shape[1]] = laplace_images[0]
+        # new_laplace_images[1, :, :laplace_images[1].shape[1]] = laplace_images[1]
+        # return new_style_images, new_laplace_images
+        return new_style_images
+
+
     @staticmethod
     def collect_fn(batch, pad_multiple=8):
         org_imgs, org_img_lens, style_imgs, style_img_lens, aug_imgs, aug_img_lens,\
