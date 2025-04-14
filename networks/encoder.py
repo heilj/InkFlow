@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 from einops import rearrange, repeat
+from networks.transformer import TransformerEncoderLayer, TransformerEncoder, PositionalEncoding, TransformerDecoder, TransformerDecoderLayer
 
 """
 The style encoder uses a Laplacian filter on the input image to capture high-frequency style elements 
@@ -64,6 +65,77 @@ class ContentEncoder(nn.Module):
 
         return content  # [T, B, D]
     
+class ContentOnlyEncoder(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_encoder_layers=3,
+                 dim_feedforward=1024, dropout=0.1, activation="relu"):
+        super().__init__()
+        
+        self.content_encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            *list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]
+        )
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation)
+        self.content_transformer = TransformerEncoder(encoder_layer, num_encoder_layers)
+        self.add_position1D = PositionalEncoding(dropout=dropout, dim=d_model)
+
+        self.proj = nn.Linear(512, d_model)  # if output spatial size is 7x7 (typical for ResNet18)
+
+    def encode_content(self, content):  # [B, T, H, W]
+        B, T, H, W = content.shape
+        content = rearrange(content, 'b t h w -> (b t) 1 h w')
+        feat = self.content_encoder(content)  # [(B*T), C, h', w']
+        feat = feat.view(feat.shape[0], -1)   # flatten spatial dimensions
+        feat = self.proj(feat)                # [(B*T), d_model]
+        feat = feat.view(B, T, -1)            # [B, T, d_model]
+        feat = feat.permute(1, 0, 2).contiguous()  # [T, B, d_model]
+        feat = self.add_position1D(feat)
+        return feat
+    
+    def forward(self, content):
+        content_feat = self.encode_content(content)  # [T, B, d_model]
+        encoded = self.content_transformer(content_feat)  # [T, B, d_model]
+        return encoded.permute(1, 0, 2).contiguous()  # [B, T, d_model]
+
+    # def forward(self, content, style):
+    #     content_feat = self.encode_content(content)  # [T, B, d_model]
+
+    #     # Suppose style is preprocessed: [T, B, d_model] (same as anchor_low_feature in original)
+    #     # If not, add your style encoder code here
+    #     style_feat = self.encode_style(style)  # or use fixed dummy for testing
+
+    #     fused = self.decoder(content_feat, style_feat)  # standard TransformerDecoder
+    #     return fused[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
+
+class ContentDecoderTR(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_layers=3,
+                 dim_feedforward=1024, dropout=0.1, activation="relu",
+                 normalize_before=True):
+        super().__init__()
+
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.decoder = TransformerDecoder(decoder_layer, num_layers, decoder_norm)
+
+    def forward(self, content_seq):
+        """
+        content_seq: Tensor of shape [T, B, d_model] from your content encoder.
+        """
+        # Just apply decoder with no cross-attention
+        out = self.decoder(content_seq, memory=None)
+        return out[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
+    
+    # def forward(self, content_seq, style_seq):
+    #     """
+    #     content_seq: Tensor of shape [T, B, d_model] (from content encoder).
+    #     style_seq: Tensor of shape [S, B, d_model] (from style encoder).
+    #     """
+    #     out = self.decoder(content_seq, memory=style_seq)
+    #     return out[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
+
+
 
 """
 In ConcatFuser, the style embedding (length D) is broadcast to the content feature map's spatial shape 
