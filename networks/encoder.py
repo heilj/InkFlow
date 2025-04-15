@@ -41,29 +41,29 @@ class StyleEncoder(nn.Module):
         style_embed = self.fc_embed(style_vector)         # [B, embed_dim] fixed-length style embedding
         return style_embed
 
-class ContentEncoder(nn.Module):
-    def __init__(self,output_dim=256):
-        super().__init__()
-        # Use pretrained resnet18 backbone but modify the first conv layer to take 1-channel input
-        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+# class ContentEncoder(nn.Module):
+#     def __init__(self,output_dim=256):
+#         super().__init__()
+#         # Use pretrained resnet18 backbone but modify the first conv layer to take 1-channel input
+#         resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
 
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            *list(resnet.children())[1:-2]  # exclude avgpool and fc
-        )
-        self.proj = nn.Linear(512, output_dim)
+#         self.encoder = nn.Sequential(
+#             nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+#             *list(resnet.children())[1:-2]  # exclude avgpool and fc
+#         )
+#         self.proj = nn.Linear(512, output_dim)
 
-    def forward(self, content):
-        # content shape: [B, T, H, W]
-        B = content.shape[0]
+#     def forward(self, content):
+#         # content shape: [B, T, H, W]
+#         B = content.shape[0]
 
-        content = rearrange(content, 'n t h w -> (n t) 1 h w').contiguous()  # [B*T, 1, H, W]
-        content = self.encoder(content)  # [B*T, 512, Hc, Wc]
-        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=B).contiguous()
-        content = self.proj(content)
-        content = content.permute(1, 0, 2).contiguous() # t n c
+#         content = rearrange(content, 'n t h w -> (n t) 1 h w').contiguous()  # [B*T, 1, H, W]
+#         content = self.encoder(content)  # [B*T, 512, Hc, Wc]
+#         content = rearrange(content, '(n t) c h w ->t n (c h w)', n=B).contiguous()
+#         content = self.proj(content)
+#         content = content.permute(1, 0, 2).contiguous() # t n c
 
-        return content  # [T, B, D]
+#         return content  # [T, B, D]
     
 class ContentOnlyEncoder(nn.Module):
     def __init__(self, d_model=256, nhead=8, num_encoder_layers=3,
@@ -108,6 +108,45 @@ class ContentOnlyEncoder(nn.Module):
     #     fused = self.decoder(content_feat, style_feat)  # standard TransformerDecoder
     #     return fused[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
 
+
+class ContentStyleEncoder(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_encoder_layers=3,
+                 dim_feedforward=1024, dropout=0.1, activation="relu"):
+        super().__init__()
+        
+        self.content_encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            *list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]
+        )
+
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation)
+        self.content_transformer = TransformerEncoder(encoder_layer, num_encoder_layers)
+        self.add_position1D = PositionalEncoding(dropout=dropout, dim=d_model)
+
+        self.proj = nn.Linear(512, d_model)  # if output spatial size is 7x7 (typical for ResNet18)
+
+    def encode_content(self, content):  # [B, T, H, W]
+        B, T, H, W = content.shape
+        content = rearrange(content, 'b t h w -> (b t) 1 h w')
+        feat = self.content_encoder(content)  # [(B*T), C, h', w']
+        feat = feat.view(feat.shape[0], -1)   # flatten spatial dimensions
+        feat = self.proj(feat)                # [(B*T), d_model]
+        feat = feat.view(B, T, -1)            # [B, T, d_model]
+        feat = feat.permute(1, 0, 2).contiguous()  # [T, B, d_model]
+        feat = self.add_position1D(feat)
+        return feat
+
+    def forward(self, content, style):
+        content_feat = self.encode_content(content)  # [T, B, d_model]
+
+        # Suppose style is preprocessed: [T, B, d_model] (same as anchor_low_feature in original)
+        # If not, add your style encoder code here
+        style_feat = self.encode_style(style)  # or use fixed dummy for testing
+
+        fused = self.decoder(content_feat, style_feat)  # standard TransformerDecoder
+        return fused[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
+
 class ContentDecoderTR(nn.Module):
     def __init__(self, d_model=256, nhead=8, num_layers=3,
                  dim_feedforward=1024, dropout=0.1, activation="relu",
@@ -135,7 +174,24 @@ class ContentDecoderTR(nn.Module):
     #     out = self.decoder(content_seq, memory=style_seq)
     #     return out[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
 
+class FuseDecoderTR(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_layers=3,
+                 dim_feedforward=1024, dropout=0.1, activation="relu",
+                 normalize_before=True):
+        super().__init__()
 
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.decoder = TransformerDecoder(decoder_layer, num_layers, decoder_norm)
+
+    def forward(self, content_seq, style_seq):
+        """
+        content_seq: Tensor of shape [T, B, d_model] (from content encoder).
+        style_seq: Tensor of shape [S, B, d_model] (from style encoder).
+        """
+        out = self.decoder(content_seq, memory=style_seq)
+        return out[0].permute(1, 0, 2).contiguous()  # [B, T, d_model]
 
 """
 In ConcatFuser, the style embedding (length D) is broadcast to the content feature map's spatial shape 
