@@ -218,7 +218,7 @@ class Upsample(nn.Module):
         return self.conv(x)
 
 class UNetGenerator(nn.Module):
-    def __init__(self, input_channels=1, cond_channels=256, base_channels=128, time_embed_dim=128, context_dim=256):
+    def __init__(self, input_channels=1, base_channels=128, time_embed_dim=128, context_dim=256):
         super().__init__()
         self.time_mlp = nn.Sequential(
             nn.Linear(1, time_embed_dim),

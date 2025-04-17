@@ -41,29 +41,29 @@ class StyleEncoder(nn.Module):
         style_embed = self.fc_embed(style_vector)         # [B, embed_dim] fixed-length style embedding
         return style_embed
 
-# class ContentEncoder(nn.Module):
-#     def __init__(self,output_dim=256):
-#         super().__init__()
-#         # Use pretrained resnet18 backbone but modify the first conv layer to take 1-channel input
-#         resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+class ContentEncoder(nn.Module):
+    def __init__(self,output_dim=256):
+        super().__init__()
+        # Use pretrained resnet18 backbone but modify the first conv layer to take 1-channel input
+        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
 
-#         self.encoder = nn.Sequential(
-#             nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
-#             *list(resnet.children())[1:-2]  # exclude avgpool and fc
-#         )
-#         self.proj = nn.Linear(512, output_dim)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            *list(resnet.children())[1:-2]  # exclude avgpool and fc
+        )
+        self.proj = nn.Linear(512, output_dim)
 
-#     def forward(self, content):
-#         # content shape: [B, T, H, W]
-#         B = content.shape[0]
+    def forward(self, content):
+        # content shape: [B, T, H, W]
+        B = content.shape[0]
 
-#         content = rearrange(content, 'n t h w -> (n t) 1 h w').contiguous()  # [B*T, 1, H, W]
-#         content = self.encoder(content)  # [B*T, 512, Hc, Wc]
-#         content = rearrange(content, '(n t) c h w ->t n (c h w)', n=B).contiguous()
-#         content = self.proj(content)
-#         content = content.permute(1, 0, 2).contiguous() # t n c
+        content = rearrange(content, 'n t h w -> (n t) 1 h w').contiguous()  # [B*T, 1, H, W]
+        content = self.encoder(content)  # [B*T, 512, Hc, Wc]
+        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=B).contiguous()
+        content = self.proj(content)
+        content = content.permute(1, 0, 2).contiguous() # t n c
 
-#         return content  # [T, B, D]
+        return content  # [T, B, D]
     
 class ContentOnlyEncoder(nn.Module):
     def __init__(self, d_model=256, nhead=8, num_encoder_layers=3,
