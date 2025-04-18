@@ -60,14 +60,15 @@ t_val_len = int(0.01 * val_len)
 train_set, val_set = random_split(dataset, [train_len, val_len])
 _, t_val_set = random_split(val_set, [val_len - t_val_len, t_val_len])
 
-train_loader = DataLoader(train_set, batch_size=4, shuffle=True,
+batch_size = 1
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
 wid_style_samples = {}
 valid_loader = DataLoader(val_set, batch_size=1, shuffle=True,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
-t_valid_loader = DataLoader(t_val_set, batch_size=4, shuffle=True,
+t_valid_loader = DataLoader(t_val_set, batch_size=batch_size, shuffle=True,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
 # style_encoder = StyleEncoder()
@@ -75,7 +76,7 @@ content_encoder = ContentEncoder()
 # Choose fusion strategy: either concatenation or cross-attention
 use_concat = True  # set False to use cross-attention variant
 # fuser = CrossAttnFuser(embed_dim=256, num_heads=4)
-unet = UNetGenerator(input_channels=1, base_channels=64)
+unet = UNetGenerator(input_channels=1, base_channels=32)
 
 for batch in tqdm(train_loader, desc="Preloading style refs"):
     wid = int(batch['wids'][0])

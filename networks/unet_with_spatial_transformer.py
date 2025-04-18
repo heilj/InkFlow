@@ -122,28 +122,28 @@ class UNetGenerator(nn.Module):
         # Down path (4 steps)
         self.down1 = SequentialWithT(
             ResBlock(input_channels, base_channels, time_embed_dim),
-            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels, 2, 16, context_dim=context_dim)
         )
         self.down2 = SequentialWithT(
             Downsample(base_channels),
             ResBlock(base_channels, base_channels * 2, time_embed_dim),
-            SpatialTransformer(base_channels * 2, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels * 2, 2, 16, context_dim=context_dim)
         )
         self.down3 = SequentialWithT(
             Downsample(base_channels * 2),
             ResBlock(base_channels * 2, base_channels * 4, time_embed_dim),
-            SpatialTransformer(base_channels * 4, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels * 4, 2, 16, context_dim=context_dim)
         )
         self.down4 = SequentialWithT(
             Downsample(base_channels * 4),
             ResBlock(base_channels * 4, base_channels * 8, time_embed_dim),
-            SpatialTransformer(base_channels * 8, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels * 8, 2, 16, context_dim=context_dim)
         )
 
         # Bottleneck
         self.bottleneck = SequentialWithT(
             ResBlock(base_channels * 8, base_channels * 8, time_embed_dim),
-            SpatialTransformer(base_channels * 8, 4, 32, context_dim=context_dim),
+            SpatialTransformer(base_channels * 8, 2, 16, context_dim=context_dim),
             ResBlock(base_channels * 8, base_channels * 8, time_embed_dim)
         )
 
@@ -151,17 +151,17 @@ class UNetGenerator(nn.Module):
         self.up4 = SequentialWithT(
             Upsample(base_channels * 8),
             ResBlock(base_channels * 8, base_channels * 4, time_embed_dim),
-            SpatialTransformer(base_channels * 4, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels * 4, 2, 16, context_dim=context_dim)
         )
         self.up3 = SequentialWithT(
             Upsample(base_channels * 4),
             ResBlock(base_channels * 4, base_channels * 2, time_embed_dim),
-            SpatialTransformer(base_channels * 2, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels * 2, 2, 16, context_dim=context_dim)
         )
         self.up2 = SequentialWithT(
             Upsample(base_channels * 2),
             ResBlock(base_channels * 2, base_channels, time_embed_dim),
-            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim)
+            SpatialTransformer(base_channels, 2, 16, context_dim=context_dim)
         )
         self.up1 = SequentialWithT(
             ResBlock(base_channels, base_channels, time_embed_dim)

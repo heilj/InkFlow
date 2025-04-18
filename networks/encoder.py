@@ -56,9 +56,10 @@ class ContentEncoder(nn.Module):
     def forward(self, content):
         # content shape: [B, T, H, W]
         B = content.shape[0]
-
+        content = content.contiguous()
         content = rearrange(content, 'n t h w -> (n t) 1 h w').contiguous()  # [B*T, 1, H, W]
         content = self.encoder(content)  # [B*T, 512, Hc, Wc]
+        content = content.contiguous()
         content = rearrange(content, '(n t) c h w ->t n (c h w)', n=B).contiguous()
         content = self.proj(content)
         content = content.permute(1, 0, 2).contiguous() # t n c
