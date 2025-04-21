@@ -33,7 +33,7 @@ from flow_matching.sampler import PathSampler
 from flow_matching.solver import ModelWrapper, ODESolver
 from flow_matching.utils import model_size_summary, set_seed
 
-from networks.unet_with_spatial_transformer import UNetGenerator
+from networks.deep_unet import UNetGenerator
 from networks.encoder import ContentEncoder
 from networks.utils import letter2index, con_symbols
 
@@ -52,15 +52,15 @@ dataset = Hdf5Dataset(
     process_style=True
 )
 
-train_len = int(0.01 * len(dataset))
+train_len = int(0.8 * len(dataset))
 val_len = len(dataset) - train_len
 
-t_val_len = int(0.01 * val_len)
+t_val_len = int(0.99 * val_len)
 
 train_set, val_set = random_split(dataset, [train_len, val_len])
 _, t_val_set = random_split(val_set, [val_len - t_val_len, t_val_len])
 
-batch_size = 1
+batch_size = 8
 train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
@@ -76,7 +76,7 @@ content_encoder = ContentEncoder()
 # Choose fusion strategy: either concatenation or cross-attention
 use_concat = True  # set False to use cross-attention variant
 # fuser = CrossAttnFuser(embed_dim=256, num_heads=4)
-unet = UNetGenerator(input_channels=1, base_channels=32)
+unet = UNetGenerator(input_channels=1, base_channels=64)
 
 for batch in tqdm(train_loader, desc="Preloading style refs"):
     wid = int(batch['wids'][0])
@@ -99,7 +99,7 @@ class ScriptArguments:
     do_sample: bool = False
     batch_size: int = 4
     n_epochs: int = 20
-    learning_rate: float = 5e-4
+    learning_rate: float = 1e-4
     sigma_min: float = 0.0
     seed: int = 42
     output_dir: str = "outputs"
@@ -124,7 +124,7 @@ recognizer = Recognizer(
     rnn_depth=2,          # or 1 if that's how it was trained
     bidirectional=True
 ).to(device)
-recognizer.load_state_dict(torch.load("./pretrained/ocr_iam_new.pth", map_location=torch.device("mps"))["Recognizer"])
+recognizer.load_state_dict(torch.load("./pretrained/ocr_iam_new.pth", map_location=torch.device("cuda"))["Recognizer"])
 
 recognizer.eval()
 
@@ -149,7 +149,7 @@ def train_flow_matching_model(args: ScriptArguments):
     """
 
     # === Setup ===
-    output_dir = Path(args.output_dir) / "FM"
+    output_dir = Path(args.output_dir) / "FM_new_unet"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps")
@@ -254,7 +254,7 @@ def train_flow_matching_model(args: ScriptArguments):
 
             # === Backprop ===
             scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -272,15 +272,15 @@ def train_flow_matching_model(args: ScriptArguments):
         print(f"Epoch {epoch+1}/{args.n_epochs} | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_valid_loss:.4f}")
 
         # === Save checkpoint ===
-        if epoch == 0 or (epoch + 1) % 5 == 0:
-            ckpt_path = output_dir / f"epoch_{epoch+1:02d}.pth"
-            torch.save({
-                'content_encoder': content_encoder.state_dict(),
-                'unet': unet.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }, ckpt_path)
-            print(f"Checkpoint saved to {ckpt_path}")
-            plot_few_shot_style_transfer(args,epoch+1,)
+        # if epoch == 0 or (epoch + 1) % 5 == 0:
+        ckpt_path = output_dir / f"epoch_{epoch+1:02d}.pth"
+        torch.save({
+            'content_encoder': content_encoder.state_dict(),
+            'unet': unet.state_dict(),
+            'optimizer': optimizer.state_dict(),
+        }, ckpt_path)
+        print(f"Checkpoint saved to {ckpt_path}")
+        plot_few_shot_style_transfer(args,epoch+1,)
 
 
 def validate(unet, content_encoder, path_sampler, recognizer, val_loader, device, args):
@@ -342,7 +342,7 @@ def validate(unet, content_encoder, path_sampler, recognizer, val_loader, device
     return avg_mse, avg_ctc
 
 def plot_few_shot_style_transfer(args, epoch, num_samples=5, k=2):
-    os.makedirs("fm_vis", exist_ok=True)
+    os.makedirs("fm_vis_ne_unet", exist_ok=True)
 
     # Load models
     unet = args.unet.eval()
@@ -437,7 +437,7 @@ def plot_few_shot_style_transfer(args, epoch, num_samples=5, k=2):
             axes[row, j + k].axis("off")
 
     plt.tight_layout()
-    vis_path = f"fm_vis/epoch_{epoch}_fewshot.png"
+    vis_path = f"fm_vis_new_unet/epoch_{epoch}_fewshot.png"
     plt.savefig(vis_path)
     plt.close()
     print(f"Visualization saved to {vis_path}")
