@@ -38,9 +38,16 @@ from networks.encoder import ContentEncoder
 from networks.utils import letter2index, con_symbols
 
 from networks.module import Recognizer  
+from diffusers import AutoencoderKL
 
 tqdm = partial(std_tqdm, dynamic_ncols=True)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+
+vae = AutoencoderKL.from_pretrained('stable-diffusion-v1-5', subfolder="vae")
+"""Freeze vae and text_encoder"""
+vae.requires_grad_(False)
+vae = vae.to(device)
 
 # ========== Dataset ==========
 transforms = Compose([ToTensor(), Normalize([0.5], [0.5])])
@@ -52,7 +59,7 @@ dataset = Hdf5Dataset(
     process_style=True
 )
 
-train_len = int(0.8 * len(dataset))
+train_len = int(0.9 * len(dataset))
 val_len = len(dataset) - train_len
 
 t_val_len = int(0.99 * val_len)
@@ -60,15 +67,15 @@ t_val_len = int(0.99 * val_len)
 train_set, val_set = random_split(dataset, [train_len, val_len])
 _, t_val_set = random_split(val_set, [val_len - t_val_len, t_val_len])
 
-batch_size = 8
-train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+batch_size = 32
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
 wid_style_samples = {}
 valid_loader = DataLoader(val_set, batch_size=1, shuffle=True,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
-t_valid_loader = DataLoader(t_val_set, batch_size=batch_size, shuffle=True,
+t_valid_loader = DataLoader(t_val_set, batch_size=batch_size, shuffle=True, num_workers=4,
                           collate_fn=Hdf5Dataset.sorted_collect_fn_for_ctc, drop_last=True)
 
 # style_encoder = StyleEncoder()
@@ -76,7 +83,7 @@ content_encoder = ContentEncoder()
 # Choose fusion strategy: either concatenation or cross-attention
 use_concat = True  # set False to use cross-attention variant
 # fuser = CrossAttnFuser(embed_dim=256, num_heads=4)
-unet = UNetGenerator(input_channels=1, base_channels=64)
+unet = UNetGenerator(input_channels=4, base_channels=128)
 
 for batch in tqdm(train_loader, desc="Preloading style refs"):
     wid = int(batch['wids'][0])
@@ -98,8 +105,8 @@ class ScriptArguments:
     do_train: bool = True
     do_sample: bool = False
     batch_size: int = 4
-    n_epochs: int = 20
-    learning_rate: float = 1e-4
+    n_epochs: int = 50
+    learning_rate: float = 2e-4
     sigma_min: float = 0.0
     seed: int = 42
     output_dir: str = "outputs"
@@ -112,7 +119,7 @@ class ScriptArguments:
     lambda_ctc = 0.1
     starting_epoch = 0
 
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
+
 # ========== Pretrained Recognizer from HiGan+ ==========
 recognizer = Recognizer(
     n_class=80,           # or however many characters your alphabet has
@@ -167,6 +174,7 @@ def train_flow_matching_model(args: ScriptArguments):
              list(unet.parameters())
 
     optimizer = torch.optim.AdamW(params, lr=args.learning_rate)
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
     scaler = GradScaler(enabled=(device.type == device))
 
     # Print model summary
@@ -184,13 +192,16 @@ def train_flow_matching_model(args: ScriptArguments):
         total_loss = 0
         for batch in pbar:
             # === Load Data ===
-            x_1 = batch['org_imgs'].to(device)             # ground-truth handwriting
+            images = batch['org_imgs'].to(device)             # ground-truth handwriting
             # style_ref = batch['style_imgs'].to(device)
             label_seqs = batch['lbs'].to(device)
             label_lens = batch['lb_lens'].to(device)
             content_img = batch['content'].to(device) # rendered text img B x T x H x W
             img_lens = batch['org_img_lens'].to(device)
             # style_img = batch['style_imgs'].to(device)     # reference handwriting (1-shot style)
+            images = images.repeat(1, 3, 1, 1)
+            images = vae.encode(images).latent_dist.sample()
+            images = images * 0.18215
 
             # === Process Style ===
             # style_edge = laplacian_filter(style_img)                      # Bx1xHxW
@@ -204,6 +215,7 @@ def train_flow_matching_model(args: ScriptArguments):
             cond_feat = content_feat                 # B x T x D
             
             # === Sample Flow Path ===
+            x_1 = images
             x_0 = torch.randn_like(x_1)                                   # noise
             t = torch.rand(x_1.size(0), 1, device=device)                 # time [B,1]
             x_t, dx_t = path_sampler.sample(x_0, x_1, t.squeeze(1))      # [B,1,H,W], [B,1,H,W]
@@ -260,6 +272,8 @@ def train_flow_matching_model(args: ScriptArguments):
 
             pbar.set_postfix(loss=loss.item())
             total_loss += loss.item()
+
+        scheduler.step()
         avg_train_loss = total_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         val_mse, val_ctc = validate(
@@ -292,7 +306,7 @@ def validate(unet, content_encoder, path_sampler, recognizer, val_loader, device
 
     with torch.no_grad():
         for batch in tqdm(val_loader):
-            x_1 = batch['org_imgs'].to(device)
+            images = batch['org_imgs'].to(device)   
             # style_ref = batch['style_imgs'].to(device)
             label_seqs = batch['lbs'].to(device)
             label_lens = batch['lb_lens'].to(device)
@@ -303,6 +317,12 @@ def validate(unet, content_encoder, path_sampler, recognizer, val_loader, device
             content_h = content_encoder(content_img)
             cond_feat = content_h
 
+            images = images.repeat(1, 3, 1, 1)
+            images = vae.encode(images).latent_dist.sample()
+            images = images * 0.18215
+
+            x_1 = images
+            
             x_0 = torch.randn_like(x_1)
             t = torch.rand(x_1.size(0), 1, device=device)
             x_t, dx_t = path_sampler.sample(x_0, x_1, t.squeeze(1))
@@ -342,7 +362,7 @@ def validate(unet, content_encoder, path_sampler, recognizer, val_loader, device
     return avg_mse, avg_ctc
 
 def plot_few_shot_style_transfer(args, epoch, num_samples=5, k=2):
-    os.makedirs("fm_vis_ne_unet", exist_ok=True)
+    os.makedirs("fm_vis_new_unet", exist_ok=True)
 
     # Load models
     unet = args.unet.eval()
@@ -396,9 +416,11 @@ def plot_few_shot_style_transfer(args, epoch, num_samples=5, k=2):
             cond_feat = contnet_vecs[j].to(device)
 
             label_len_j = fake_lb_lens[j].unsqueeze(0)
+            add = (label_len_j % 2).long()
+            # add the mask → +1 if odd, +0 if even
+            label_len_j = label_len_j + add
             width = label_len_j.item() * args.char_width  # use your char_width from args
-
-            x0 = torch.randn(1, 1, 64, width).to(device)
+            x0 = torch.randn(1, 4, 64//8, width//8).to(device)
 
             # def ode_func(t, x):
             #     t_exp = t.expand(x.size(0))
@@ -430,6 +452,8 @@ def plot_few_shot_style_transfer(args, epoch, num_samples=5, k=2):
             )
             sol = sol.detach().cpu()
             img = sol[-1]
+            latents = 1 / 0.18215 * img
+            img = vae.decode(latents.to(device)).sample
             # img = (sol.clamp(-1, 1) + 1) / 2
 
             axes[row, j + k].imshow(img[0, 0].cpu(), cmap="gray")
