@@ -1,6 +1,7 @@
-# InkShift
+# InkFllow
 
 ## DS 301 project: Personalized Handwriting Style Transfer
+
 
 ### Environment
 
@@ -13,7 +14,7 @@ Flow matching env: ```bash pip install -r requirements_fm.txt```
 
 HiGan+ inderence, follow <https://github.com/ganji15/HiGANplus.git>, change plt.show() to plt.savefig() in `/HiGANplus/HiGAN+/networks/model.py`
 
-Curent demo env: same as flow matching
+previous demo env: same as flow matching
 
 ### Dataset
 
@@ -27,13 +28,37 @@ For use of dataset and understanding of its structure, see `./IAM_data_process_d
 
 Data processing files are under `./lib`
 
+For additional data process on content image and style image, use `./Generate_font_img.py` and `./save_style_img.py`
+
+
 ### Flow matching
 
-`Conditioned_FM_on_IAM.py` dependent on other `./lib`, `./networks`, `./flow_matching`
+Main code include train and inference dependent on other `./lib`, `./networks`, `./flow_matching`, `.pretrianed`
 
-details will be updated later
+#### Train
 
-### Current demos
+`python ./LCFM_style_cfg.py` 
+latest distributed training script, hyper params defined inside
+
+#### Inference
+
+`python ./inference_with_random_writer.py`
+inference with random writers form IAM test set, need specifcation on ckpt, cfg scale, and input text
+
+`python ./inference_with_custom_writer.py`
+inference with custom writers with preprocessed style image, need specifcation on ckpt, cfg scale, and input text
+
+
+other details, ckpts... will be updated later
+
+
+#### Results
+
+current results of custom inputs are in `custom_outputs`, where the text label and style reference can be found under `./data`.
+
+### Previous demos
+
+*this is a legacy of previous attempts and does not related to the result of the project.*
 
 `./Flow_matching_demo.py` : simple flow matching demo on MNIST
 

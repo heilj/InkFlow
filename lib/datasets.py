@@ -14,6 +14,97 @@ from lib.path_config import data_roots, data_paths, ImgHeight, CharWidth
 from lib.transforms import RandomScale, RandomClip
 import pickle
 import random
+import math
+
+from torch.utils.data import Sampler
+from collections import defaultdict
+
+class LengthAwareSubset(torch.utils.data.Dataset):
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+        self.lengths = [dataset.img_lens[i] for i in indices]  # precompute img_lens
+        # print(self.img_lens)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
+
+class BucketSampler(Sampler):
+    def __init__(self, dataset, batch_size, num_buckets=32, shuffle_buckets=True, shuffle_within_bucket=True, 
+                 num_replicas=1, rank=0, drop_last=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.num_buckets = num_buckets
+        self.shuffle_buckets = shuffle_buckets
+        self.shuffle_within_bucket = shuffle_within_bucket
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.drop_last = drop_last
+        self.lengths = dataset.lengths
+        self.indices = list(range(len(dataset)))
+        
+        self._batches = None
+        
+    def _create_batches(self):
+        # Create a list of (idx, length) pairs and sort by length
+        idx_lengths = list(zip(self.indices, self.lengths))
+        sorted_idx_lengths = sorted(idx_lengths, key=lambda x: x[1])
+        
+        # Divide indices into buckets of similar lengths
+        buckets = []
+        samples_per_bucket = len(sorted_idx_lengths) // self.num_buckets
+        for i in range(0, len(sorted_idx_lengths), samples_per_bucket):
+            if i + samples_per_bucket <= len(sorted_idx_lengths):
+                buckets.append(sorted_idx_lengths[i:i+samples_per_bucket])
+            elif not self.drop_last:
+                buckets[-1].extend(sorted_idx_lengths[i:])
+        
+        # Shuffle within each bucket if required
+        if self.shuffle_within_bucket:
+            for bucket in buckets:
+                random.shuffle(bucket)
+        
+        # Extract indices from buckets
+        bucket_indices = [[idx for idx, _ in bucket] for bucket in buckets]
+        
+        # Create batches from each bucket
+        batches = []
+        for indices in bucket_indices:
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i+self.batch_size]
+                if len(batch) == self.batch_size or (not self.drop_last and len(batch) > 0):
+                    batches.append(batch)
+        
+        # Shuffle the batches if required
+        if self.shuffle_buckets:
+            random.shuffle(batches)
+        
+        # DDP slicing
+        batches = batches[self.rank::self.num_replicas]
+        
+        return batches
+    
+    def __iter__(self):
+        self._batches = self._create_batches()
+        return iter(self._batches)
+    
+    def __len__(self):
+        if self._batches is None:
+            self._batches = self._create_batches()
+        return len(self._batches)
+    
+    def set_epoch(self, epoch):
+        # For reshuffling across epochs
+        self.epoch = epoch
+        random.seed(epoch)  # This ensures different shuffling per epoch
+
+
+
+
+
 
 
 class Hdf5Dataset(Dataset):
@@ -45,7 +136,8 @@ class Hdf5Dataset(Dataset):
             self.wids = h5f['wids'][:]
             if normalize_wid:
                 self.wids -= self.wids.min()
-            valid_idxs = (self.img_lens >= 16)
+            # print(self.lb_lens)
+            valid_idxs = (self.img_lens <= 352)
 
             self.img_seek_idxs = self.img_seek_idxs[valid_idxs]
             self.lb_seek_idxs = self.lb_seek_idxs[valid_idxs]
@@ -153,9 +245,68 @@ class Hdf5Dataset(Dataset):
         # return new_style_images, new_laplace_images
         return new_style_images
 
+    @staticmethod
+    def vanilla_collect_fn(batch):
+        org_imgs, org_img_lens, style_imgs, style_img_lens, aug_imgs, aug_img_lens,\
+        lbs, lb_lens, wids = [], [], [], [], [], [], [], [], []
+
+        for data in batch:
+            org_img, style_img, lb, wid = data['org_img'], data['style_img'], data['lb'], data['wid']
+            aug_img = data['aug_img'] if 'aug_img' in data else None
+            if isinstance(org_img, torch.Tensor):
+                org_img = org_img.numpy()
+            if isinstance(style_img, torch.Tensor):
+                style_img = style_img.numpy()
+            if aug_img is not None and isinstance(aug_img, torch.Tensor):
+                aug_img = aug_img.numpy()
+
+            org_imgs.append(org_img)
+            org_img_lens.append(org_img.shape[-1])
+            style_imgs.append(style_img)
+            style_img_lens.append(style_img.shape[-1])
+            lbs.append(lb)
+            lb_lens.append(len(lb))
+            wids.append(wid)
+            if aug_img is not None:
+                aug_imgs.append(aug_img)
+                aug_img_lens.append(Hdf5Dataset._recalc_len(aug_img.shape[-1]))
+
+        bdata = {}
+        bz = len(lb_lens)
+        pad_org_img_max_len = Hdf5Dataset._recalc_len(max(org_img_lens))
+        pad_org_imgs = -np.ones((bz, 1, org_imgs[0].shape[-2], pad_org_img_max_len))
+        for i, (org_img, org_img_len) in enumerate(zip(org_imgs, org_img_lens)):
+            pad_org_imgs[i, 0, :, :org_img_len] = org_img
+        bdata['org_imgs'] = torch.from_numpy(pad_org_imgs).float()
+        bdata['org_img_lens'] = torch.IntTensor(org_img_lens)
+
+        pad_style_img_max_len = Hdf5Dataset._recalc_len(max(style_img_lens))
+        pad_style_imgs = -np.ones((bz, 1, style_imgs[0].shape[-2], pad_style_img_max_len))
+        for i, (style_img, style_img_len) in enumerate(zip(style_imgs, style_img_lens)):
+            pad_style_imgs[i, 0, :, :style_img_len] = style_img
+        bdata['style_imgs'] = torch.from_numpy(pad_style_imgs).float()
+        bdata['style_img_lens'] = torch.IntTensor(style_img_lens)
+
+        pad_lbs = np.zeros((bz, max(lb_lens)))
+        for i, (lb, lb_len) in enumerate(zip(lbs, lb_lens)):
+            pad_lbs[i, :lb_len] = lb
+        bdata['lbs'] = torch.from_numpy(pad_lbs).long()
+        bdata['lb_lens'] = torch.Tensor(lb_lens).int()
+        bdata['wids'] = torch.Tensor(wids).long()
+
+        if len(aug_imgs) > 0:
+            pad_aug_imgs = -np.ones((bz, 1, aug_imgs[0].shape[-2], max(aug_img_lens)))
+            for i, aug_img in enumerate(aug_imgs):
+                pad_aug_imgs[i, 0, :, :aug_img.shape[-1]] = aug_img
+
+            bdata['aug_imgs'] = torch.from_numpy(pad_aug_imgs).float()
+            bdata['aug_img_lens'] = torch.IntTensor(aug_img_lens)
+
+        return bdata
+
 
     @staticmethod
-    def collect_fn(batch, pad_multiple=8):
+    def collect_fn(batch, pad_multiple=16):
         org_imgs, org_img_lens, style_imgs, style_img_lens, aug_imgs, aug_img_lens,\
         lbs, lb_lens, wids, laplacian_imgs, laplacian_refs, style_refs = [], [], [], [], [], [], [], [], [], [], [], []
         c_width = [len(item['content']) for item in batch]
@@ -242,7 +393,7 @@ class Hdf5Dataset(Dataset):
 
         for key, val in batch.items():
             batch[key] = torch.stack([val[i] for i in idx]).detach()
-            # print('%15s'%key, batch[key].size(), batch[key].dim())
+            print('%15s'%key, batch[key].size(), batch[key].dim())
         return batch
 
     @staticmethod
@@ -360,7 +511,7 @@ class ImageDataset(Hdf5Dataset):
     def _load_h5py(self, file_path, normalize_wid=True):
         assert os.path.exists(file_path), file_path + "does not exist!"
 
-        all_imgs, all_texts = [], []
+        all_imgs, all_writer, all_texts = [], [], []
         fileExtensions = ["jpg", "jpeg", "png", "bmp", "gif"]
         listOfFiles = []
         for extension in fileExtensions:
@@ -368,15 +519,20 @@ class ImageDataset(Hdf5Dataset):
 
         for fn in listOfFiles:
             img = cv2.imread(fn, cv2.IMREAD_GRAYSCALE)
+            img = Image.fromarray(img).convert('L')
+            img = np.array(img)
 
             # Read image labels
-            label_text = os.path.basename(fn).split('.')[0]
+            writer_name = os.path.basename(fn).split('.')[0]
 
             # Normalize image-height
             h, w = img.shape[:2]
             r = self.ImgHeight / float(h)
-            new_w = max(int(w * r), int(ImgHeight / 4 * len(label_text)))
-            dim = (new_w, ImgHeight)
+            new_w = int(w * r)
+            new_w = ((new_w + 8) // 16) * 16 
+            dim = (new_w, self.ImgHeight)
+            # new_w = max(int(w * r), int(ImgHeight / 4 * len(label_text)))
+            # dim = (new_w, ImgHeight)
             if new_w < w:
                 resize_img = cv2.resize(img, dim, interpolation=cv2.INTER_AREA)
             else:
@@ -384,7 +540,8 @@ class ImageDataset(Hdf5Dataset):
             res_img = 255 - resize_img
 
             all_imgs.append(res_img)
-            all_texts.append(label_text)
+            all_writer.append(writer_name)
+            all_texts.append('pseudo')
 
         '''========prepare image dataset==========='''
         img_seek_idxs, img_lens = [], []
@@ -406,9 +563,16 @@ class ImageDataset(Hdf5Dataset):
         self.lbs = [ord(ch) for ch in save_texts]
         self.img_seek_idxs, self.lb_seek_idxs =\
             np.array(img_seek_idxs).astype(np.int64), np.array(lb_seek_idxs).astype(np.int64)
+        # self.img_seek_idxs=\
+        #     np.array(img_seek_idxs).astype(np.int64)
         self.img_lens, self.lb_lens = \
             np.array(img_lens).astype(np.int32), np.array(lb_lens).astype(np.int32)
+        # self.img_lens= \
+        #     np.array(img_lens).astype(np.int32)
+        self.writers = all_writer
         self.wids = np.zeros((len(all_imgs),)).astype(np.int32)
+        self.org_imgs = self.imgs.copy()  
+        self.org_img_lens = self.img_lens.copy()
 
 
 def get_dataset(dset_name, split, wid_aug=False, recogn_aug=False, process_style=False):

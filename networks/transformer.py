@@ -571,11 +571,7 @@ class BasicTransformerBlock(nn.Module):
 
 class SpatialTransformer(nn.Module):
     """
-    Transformer block for image-like data.
-    First, project the input (aka embedding)
-    and reshape to b, t, d.
-    Then apply standard transformer action.
-    Finally, reshape to image
+    Transformer block for image-like data with positional encoding.
     """
     def __init__(self, in_channels, n_heads, d_head,
                  depth=1, dropout=0., context_dim=None, part='encoder', vocab_size=None):
@@ -601,27 +597,14 @@ class SpatialTransformer(nn.Module):
                                               stride=1,
                                               padding=0))
         self.part = part
-    # def forward(self, x, context=None):
-    #     # note: if no context is given, cross-attention defaults to self-attention
-    #     #print('x spatial trans in', x.shape)
         
+        # Add 2D positional encoding for spatial inputs
+        self.pos_encoder_2d = PositionalEncoding2D(dropout=dropout, d_model=inner_dim)
         
-    #     # note: if no context is given, cross-attention defaults to self-attention
-    #     b, c, h, w = x.shape
-    #     x_in = x
-    #     x = self.norm(x)
-    #     x = self.proj_in(x)
-    #     if self.part != 'sca':
-    #         x = x.contiguous()
-    #         x = rearrange(x, 'b c h w -> b (h w) c')
-    
-    #     for block in self.transformer_blocks:
-    #         x = block(x, context=context)
-    #     if self.part != 'sca':
-    #         x = x.contiguous()
-    #         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
-    #     x = self.proj_out(x)
-    #     return x + x_in
+        # Add 1D positional encoding for context if provided
+        if context_dim is not None:
+            self.pos_encoder_1d = PositionalEncoding(dropout=dropout, dim=context_dim)
+        
     def forward(self, x, context=None):
         # note: if no context is given, cross-attention defaults to self-attention
         b, c, h, w = x.shape
@@ -629,15 +612,26 @@ class SpatialTransformer(nn.Module):
         x = self.norm(x)
         x = self.proj_in(x)
         b, c_in, h, w = x.shape
+        # Apply positional encoding to context if available
+        if context is not None and hasattr(self, 'pos_encoder_1d'):
+            # Assuming context is in shape [batch_size, seq_len, dim]
+            # We need to transpose to [seq_len, batch_size, dim] for the positional encoder
+            context = context.transpose(0, 1)
+            context = self.pos_encoder_1d(context)
+            context = context.transpose(0, 1)  # Back to [batch_size, seq_len, dim]
+        
         if self.part != 'sca':
-            # Use reshape instead of rearrange
+            # Apply 2D positional encoding before reshaping
+            x = self.pos_encoder_2d(x)
+            
+            # Reshape to sequence form
             x = x.reshape(b, c_in, h*w).permute(0, 2, 1)  # b, h*w, c
         
         for block in self.transformer_blocks:
             x = block(x, context=context)
         
         if self.part != 'sca':
-            # Use reshape to go back to original shape
+            # Reshape back to spatial form
             x = x.permute(0, 2, 1).reshape(b, c_in, h, w)
         
         x = self.proj_out(x)

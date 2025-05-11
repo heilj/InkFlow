@@ -4,6 +4,27 @@ import torch.nn.functional as F
 from networks.transformer import SpatialTransformer  
 import math
 
+def normalization(channels):
+    """
+    Make a standard normalization layer.
+    :param channels: number of input channels.
+    :return: an nn.Module for normalization.
+    """
+    return GroupNorm32(32, channels)
+
+
+def conv_nd(dims, *args, **kwargs):
+    """
+    Create a 1D, 2D, or 3D convolution module.
+    """
+    if dims == 1:
+        return nn.Conv1d(*args, **kwargs)
+    elif dims == 2:
+        return nn.Conv2d(*args, **kwargs)
+    elif dims == 3:
+        return nn.Conv3d(*args, **kwargs)
+    raise ValueError(f"unsupported dimensions: {dims}")
+
 class SequentialWithT(nn.Module):
     def __init__(self, *layers):
         super().__init__()
@@ -80,7 +101,7 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     return embedding
 
 class UNetGenerator(nn.Module):
-    def __init__(self, input_channels=1, base_channels=64, context_dim=256):
+    def __init__(self, input_channels=4, base_channels=64, context_dim=256):
         super().__init__()
         time_embed_dim = base_channels * 4  # Increased from 2x to 4x
 
@@ -92,73 +113,84 @@ class UNetGenerator(nn.Module):
         )
         self.model_channels = base_channels
 
+
+        self.in_conv = conv_nd(2, input_channels, base_channels, 3, padding=1)
+
         # Down path (now with 4 levels instead of 3)
         # Level 1 - Add more ResBlocks for increased receptive field
         self.down1 = SequentialWithT(
-            ResBlock(input_channels, base_channels, time_embed_dim),
+            ResBlock(base_channels, base_channels, time_embed_dim),
+            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim),
             ResBlock(base_channels, base_channels, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim)
+            
         )
         
         # Level 2
         self.down2 = SequentialWithT(
             Downsample(base_channels),
-            ResBlock(base_channels, base_channels * 2, time_embed_dim),
-            ResBlock(base_channels * 2, base_channels * 2, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels * 2, 4, 32, context_dim=context_dim)
+            ResBlock(base_channels, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),  # Additional ResBlock
+            
         )
         
         # Level 3
         self.down3 = SequentialWithT(
-            Downsample(base_channels * 2),
-            ResBlock(base_channels * 2, base_channels * 4, time_embed_dim),
-            ResBlock(base_channels * 4, base_channels * 4, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels * 4, 4, 32, context_dim=context_dim)
+            Downsample(base_channels * 1),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),  # Additional ResBlock
+            
         )
         
         # Level 4 (new level for deeper network)
         self.down4 = SequentialWithT(
-            Downsample(base_channels * 4),
-            ResBlock(base_channels * 4, base_channels * 8, time_embed_dim),
-            ResBlock(base_channels * 8, base_channels * 8, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels * 8, 4, 32, context_dim=context_dim)
+            Downsample(base_channels * 1),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),  # Additional ResBlock
+            
         )
 
         # Bottleneck with enhanced capacity
         self.bottleneck = SequentialWithT(
-            ResBlock(base_channels * 8, base_channels * 8, time_embed_dim),
-            SpatialTransformer(base_channels * 8, 4, 32, context_dim=context_dim),
-            ResBlock(base_channels * 8, base_channels * 8, time_embed_dim)
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim)
         )
 
         # Up path (now with 4 levels)
         # Level 4
         self.up4 = SequentialWithT(
-            Upsample(base_channels * 8),
-            ResBlock(base_channels * 8, base_channels * 4, time_embed_dim),
-            ResBlock(base_channels * 4, base_channels * 4, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels * 4, 4, 32, context_dim=context_dim)
+            Upsample(base_channels * 1),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),  # Additional ResBlock
+            
         )
         
         # Level 3
         self.up3 = SequentialWithT(
-            Upsample(base_channels * 4),
-            ResBlock(base_channels * 4, base_channels * 2, time_embed_dim),
-            ResBlock(base_channels * 2, base_channels * 2, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels * 2, 4, 32, context_dim=context_dim)
+            Upsample(base_channels * 1),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),
+            SpatialTransformer(base_channels * 1, 4, 32, context_dim=context_dim),
+            ResBlock(base_channels * 1, base_channels * 1, time_embed_dim),  # Additional ResBlock
+            
         )
         
         # Level 2
         self.up2 = SequentialWithT(
-            Upsample(base_channels * 2),
-            ResBlock(base_channels * 2, base_channels, time_embed_dim),
+            Upsample(base_channels * 1),
+            ResBlock(base_channels * 1, base_channels, time_embed_dim),
+            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim),
             ResBlock(base_channels, base_channels, time_embed_dim),  # Additional ResBlock
-            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim)
+            
         )
         
         # Level 1
         self.up1 = SequentialWithT(
             ResBlock(base_channels, base_channels, time_embed_dim),
+            SpatialTransformer(base_channels, 4, 32, context_dim=context_dim),
             ResBlock(base_channels, base_channels, time_embed_dim)  # Additional ResBlock
         )
 
@@ -173,7 +205,8 @@ class UNetGenerator(nn.Module):
             timesteps = timesteps.repeat(x_t.shape[0])
 
         t_embed = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
+        
+        x_t = self.in_conv(x_t)
         # Down path
         d1 = self.down1(x_t, t_embed, cond_feat)
         d2 = self.down2(d1, t_embed, cond_feat)
